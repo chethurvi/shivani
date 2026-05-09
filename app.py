@@ -5,10 +5,8 @@ import hashlib
 import base64
 from cryptography.fernet import Fernet
 
-
 DB_NAME = "p2p_learning.db"
 FILE_ACCESS_KEY = "AES123"
-
 
 # ---------------- DATABASE ----------------
 
@@ -59,7 +57,6 @@ def reset_old_database_if_needed():
 
     cur.execute("PRAGMA table_info(files)")
     columns = [col[1] for col in cur.fetchall()]
-
     expected = {"id", "filename", "encrypted_data", "uploaded_by"}
 
     if columns and not expected.issubset(set(columns)):
@@ -70,6 +67,30 @@ def reset_old_database_if_needed():
                 filename TEXT,
                 encrypted_data BLOB,
                 uploaded_by TEXT
+            )
+        """)
+        conn.commit()
+
+    conn.close()
+
+
+def reset_old_logs_if_needed():
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("PRAGMA table_info(logs)")
+    columns = [col[1] for col in cur.fetchall()]
+    expected = {"id", "event", "details", "status", "created_at"}
+
+    if columns and not expected.issubset(set(columns)):
+        cur.execute("DROP TABLE IF EXISTS logs")
+        cur.execute("""
+            CREATE TABLE logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event TEXT,
+                details TEXT,
+                status TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         conn.commit()
@@ -146,15 +167,15 @@ def register_user(username, password, role):
             (username, hash_password(password), random_key, role)
         )
         conn.commit()
+        conn.close()
+
         add_log("User Registration", f"{username} registered as {role}", "Success")
         return random_key
 
     except sqlite3.IntegrityError:
+        conn.close()
         add_log("User Registration", f"Duplicate username attempted: {username}", "Failed")
         return None
-
-    finally:
-        conn.close()
 
 
 def verify_password(username, password):
@@ -216,14 +237,9 @@ def save_file(filename, file_bytes, uploaded_by):
     cur = conn.cursor()
 
     cur.execute("""
-        INSERT INTO files
-        (filename, encrypted_data, uploaded_by)
+        INSERT INTO files (filename, encrypted_data, uploaded_by)
         VALUES (?, ?, ?)
-    """, (
-        filename,
-        encrypted_data,
-        uploaded_by
-    ))
+    """, (filename, encrypted_data, uploaded_by))
 
     conn.commit()
     conn.close()
@@ -246,6 +262,7 @@ def get_all_files():
 
 create_tables()
 reset_old_database_if_needed()
+reset_old_logs_if_needed()
 
 st.set_page_config(
     page_title="Secure P2P Authentication",
@@ -256,20 +273,20 @@ st.set_page_config(
 
 # ---------------- SESSION STATE ----------------
 
-if "stage1" not in st.session_state:
-    st.session_state.stage1 = False
+default_session_values = {
+    "stage1": False,
+    "stage2": False,
+    "stage3": False,
+    "username": "",
+    "role": "",
+    "temp_username": "",
+    "temp_random_key": "",
+    "temp_role": ""
+}
 
-if "stage2" not in st.session_state:
-    st.session_state.stage2 = False
-
-if "stage3" not in st.session_state:
-    st.session_state.stage3 = False
-
-if "username" not in st.session_state:
-    st.session_state.username = ""
-
-if "role" not in st.session_state:
-    st.session_state.role = ""
+for key, value in default_session_values.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 
 
 # ---------------- SIDEBAR MENU ----------------
@@ -581,7 +598,7 @@ elif menu == "Attack Simulation":
 
         st.write("""
         A MITM attacker tries to intercept a file during transfer.
-        Since files are encrypted using AES-style encryption, intercepted data is unreadable.
+        Since files are encrypted, intercepted data is unreadable.
         """)
 
         sample_data = b"This is confidential learning material."
@@ -616,5 +633,8 @@ elif menu == "Logout":
     st.session_state.stage3 = False
     st.session_state.username = ""
     st.session_state.role = ""
+    st.session_state.temp_username = ""
+    st.session_state.temp_random_key = ""
+    st.session_state.temp_role = ""
 
     st.success("Logged out successfully.")
