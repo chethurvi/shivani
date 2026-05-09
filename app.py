@@ -7,6 +7,7 @@ from cryptography.fernet import Fernet
 
 
 DB_NAME = "p2p_learning.db"
+FILE_ACCESS_KEY = "AES123"
 
 
 # ---------------- DATABASE ----------------
@@ -22,23 +23,57 @@ def create_tables():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            random_key TEXT NOT NULL,
-            role TEXT NOT NULL
+            username TEXT UNIQUE,
+            password_hash TEXT,
+            random_key TEXT,
+            role TEXT
         )
     """)
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename TEXT NOT NULL,
-            encrypted_data BLOB NOT NULL,
-            uploaded_by TEXT NOT NULL
+            filename TEXT,
+            encrypted_data BLOB,
+            uploaded_by TEXT
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event TEXT,
+            details TEXT,
+            status TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
     conn.commit()
+    conn.close()
+
+
+def reset_old_database_if_needed():
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("PRAGMA table_info(files)")
+    columns = [col[1] for col in cur.fetchall()]
+
+    expected = {"id", "filename", "encrypted_data", "uploaded_by"}
+
+    if columns and not expected.issubset(set(columns)):
+        cur.execute("DROP TABLE IF EXISTS files")
+        cur.execute("""
+            CREATE TABLE files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT,
+                encrypted_data BLOB,
+                uploaded_by TEXT
+            )
+        """)
+        conn.commit()
+
     conn.close()
 
 
@@ -67,6 +102,36 @@ def decrypt_file(encrypted_bytes):
     return fernet.decrypt(encrypted_bytes)
 
 
+def verify_file_access_key(access_key):
+    return access_key == FILE_ACCESS_KEY
+
+
+# ---------------- LOGS ----------------
+
+def add_log(event, details, status):
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        "INSERT INTO logs (event, details, status) VALUES (?, ?, ?)",
+        (event, details, status)
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def get_logs():
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT created_at, event, details, status FROM logs ORDER BY id DESC")
+    logs = cur.fetchall()
+
+    conn.close()
+    return logs
+
+
 # ---------------- USER FUNCTIONS ----------------
 
 def register_user(username, password, role):
@@ -81,9 +146,13 @@ def register_user(username, password, role):
             (username, hash_password(password), random_key, role)
         )
         conn.commit()
+        add_log("User Registration", f"{username} registered as {role}", "Success")
         return random_key
+
     except sqlite3.IntegrityError:
+        add_log("User Registration", f"Duplicate username attempted: {username}", "Failed")
         return None
+
     finally:
         conn.close()
 
@@ -116,8 +185,26 @@ def verify_random_key(username, random_key):
     return result is not None
 
 
-def verify_file_access_key(access_key):
-    return access_key == "AES123"
+def count_users():
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT COUNT(*) FROM users")
+    total = cur.fetchone()[0]
+
+    conn.close()
+    return total
+
+
+def count_logs():
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT COUNT(*) FROM logs")
+    total = cur.fetchone()[0]
+
+    conn.close()
+    return total
 
 
 # ---------------- FILE FUNCTIONS ----------------
@@ -128,13 +215,20 @@ def save_file(filename, file_bytes, uploaded_by):
     conn = get_connection()
     cur = conn.cursor()
 
-    cur.execute(
-        "INSERT INTO files (filename, encrypted_data, uploaded_by) VALUES (?, ?, ?)",
+    cur.execute("""
+        INSERT INTO files
         (filename, encrypted_data, uploaded_by)
-    )
+        VALUES (?, ?, ?)
+    """, (
+        filename,
+        encrypted_data,
+        uploaded_by
+    ))
 
     conn.commit()
     conn.close()
+
+    add_log("File Upload", f"{filename} uploaded by {uploaded_by}", "Encrypted")
 
 
 def get_all_files():
@@ -148,31 +242,19 @@ def get_all_files():
     return files
 
 
-# ---------------- STREAMLIT SETUP ----------------
+# ---------------- APP SETUP ----------------
 
 create_tables()
+reset_old_database_if_needed()
 
 st.set_page_config(
-    page_title="Triple-Staged Crypto Authentication",
+    page_title="Secure P2P Authentication",
     page_icon="🔐",
-    layout="centered"
+    layout="wide"
 )
 
-st.title("🔐 Triple-Staged Crypto Authentication")
-st.subheader("Secure P2P Online Learning Application")
 
-menu = st.sidebar.selectbox(
-    "Menu",
-    [
-        "Home",
-        "Register",
-        "Login",
-        "Staff Upload File",
-        "Student View / Download File",
-        "Attack Scenarios",
-        "Logout"
-    ]
-)
+# ---------------- SESSION STATE ----------------
 
 if "stage1" not in st.session_state:
     st.session_state.stage1 = False
@@ -190,39 +272,103 @@ if "role" not in st.session_state:
     st.session_state.role = ""
 
 
-# ---------------- HOME ----------------
+# ---------------- SIDEBAR MENU ----------------
 
-if menu == "Home":
-    st.info("This system uses three security phases.")
+st.sidebar.title("🔐 P2P Security")
+st.sidebar.write("Menu")
 
-    st.write("""
-    ### Three Authentication Phases
+menu = st.sidebar.radio(
+    "",
+    [
+        "Dashboard",
+        "Register Peer",
+        "Phase 1: Identity Verification",
+        "Phase 2: Session Key",
+        "Phase 3: Secure Transfer",
+        "Secure Login",
+        "Application Dashboard",
+        "Attack Simulation",
+        "Authentication Logs",
+        "Logout"
+    ]
+)
 
-    **Phase 1:** Username and password authentication  
-    **Phase 2:** Random key verification  
-    **Phase 3:** AES file access/decryption key verification  
+st.sidebar.divider()
 
-    Staff can upload encrypted files.  
-    Students can view and download files only after passing all three stages.
-    """)
+if st.session_state.stage2:
+    st.sidebar.success(f"Logged in: {st.session_state.username}")
+    st.sidebar.info(f"Role: {st.session_state.role}")
+else:
+    st.sidebar.warning("Not logged in")
+
+
+# ---------------- HEADER ----------------
+
+st.title("🔐 Secure Three-Phase P2P Authentication System")
+st.caption("Python + Streamlit + SQLite + Hashing + Random Key + AES Encryption + Secure File Transfer")
+st.divider()
+
+
+# ---------------- DASHBOARD ----------------
+
+if menu == "Dashboard":
+    st.header("System Dashboard")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    col1.metric("Registered Peers", count_users())
+    col2.metric("Total Events", count_logs())
+    col3.metric("Logged In", "Yes" if st.session_state.stage2 else "No")
+    col4.metric("Current Peer", st.session_state.username if st.session_state.username else "None")
+
+    st.subheader("Authentication Flow")
+
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        st.info("""
+        ### Phase 1  
+        **Identity Verification**  
+        Username and password authentication
+        """)
+
+    with c2:
+        st.warning("""
+        ### Phase 2  
+        **Session Key**  
+        Random key verification
+        """)
+
+    with c3:
+        st.success("""
+        ### Phase 3  
+        **Secure Transfer**  
+        AES encrypted file upload, view and download
+        """)
+
+    st.subheader("System Status")
+    st.success("Database: Connected")
+    st.success("Encryption: Active")
+    st.success("Session Management: Active")
+    st.success("Security Layer: Three-Phase Enabled")
 
 
 # ---------------- REGISTER ----------------
 
-elif menu == "Register":
-    st.header("User Registration")
+elif menu == "Register Peer":
+    st.header("Register New Peer")
 
     username = st.text_input("Create Username")
     password = st.text_input("Create Password", type="password")
     role = st.selectbox("Select Role", ["Student", "Staff"])
 
-    if st.button("Register"):
+    if st.button("Register Peer"):
         if username and password:
             random_key = register_user(username, password, role)
 
             if random_key:
                 st.success("Registration successful!")
-                st.warning(f"Your random key is: {random_key}")
+                st.warning(f"Your random session key is: {random_key}")
                 st.info("Save this key. You need it for Phase 2 authentication.")
             else:
                 st.error("Username already exists.")
@@ -230,15 +376,15 @@ elif menu == "Register":
             st.error("Please fill all fields.")
 
 
-# ---------------- LOGIN ----------------
+# ---------------- PHASE 1 ----------------
 
-elif menu == "Login":
-    st.header("Phase 1: Username and Password Authentication")
+elif menu == "Phase 1: Identity Verification":
+    st.header("Phase 1: Identity Verification")
 
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
 
-    if st.button("Verify Phase 1"):
+    if st.button("Verify Identity"):
         user = verify_password(username, password)
 
         if user:
@@ -246,97 +392,140 @@ elif menu == "Login":
             st.session_state.temp_random_key = user[1]
             st.session_state.temp_role = user[2]
             st.session_state.stage1 = True
-            st.success("Phase 1 passed.")
+
+            add_log("Phase 1 Authentication", f"{username} password verified", "Success")
+            st.success("Phase 1 passed. Now go to Phase 2: Session Key.")
         else:
+            add_log("Phase 1 Authentication", f"Failed login attempt for {username}", "Failed")
             st.error("Invalid username or password.")
 
-    if st.session_state.stage1:
-        st.header("Phase 2: Random Key Verification")
 
-        random_key = st.text_input("Enter Random Key")
+# ---------------- PHASE 2 ----------------
 
-        if st.button("Verify Phase 2"):
+elif menu == "Phase 2: Session Key":
+    st.header("Phase 2: Random Session Key Verification")
+
+    if not st.session_state.stage1:
+        st.error("Please complete Phase 1 first.")
+    else:
+        random_key = st.text_input("Enter Random Session Key")
+
+        if st.button("Verify Session Key"):
             if verify_random_key(st.session_state.temp_username, random_key):
                 st.session_state.stage2 = True
                 st.session_state.username = st.session_state.temp_username
                 st.session_state.role = st.session_state.temp_role
+
+                add_log("Phase 2 Authentication", f"{st.session_state.username} random key verified", "Success")
                 st.success("Phase 2 passed.")
                 st.info(f"Logged in as {st.session_state.username} ({st.session_state.role})")
             else:
+                add_log("Phase 2 Authentication", "Incorrect random key entered", "Failed")
                 st.error("Invalid random key. Access denied.")
 
 
-# ---------------- STAFF UPLOAD ----------------
+# ---------------- PHASE 3 ----------------
 
-elif menu == "Staff Upload File":
-    st.header("Staff Upload Encrypted File")
-
-    if not st.session_state.stage2:
-        st.error("Please complete Phase 1 and Phase 2 login first.")
-    elif st.session_state.role != "Staff":
-        st.error("Only staff can upload files.")
-    else:
-        uploaded_file = st.file_uploader("Upload Learning File")
-
-        if uploaded_file is not None:
-            file_bytes = uploaded_file.read()
-
-            if st.button("Encrypt and Upload File"):
-                save_file(uploaded_file.name, file_bytes, st.session_state.username)
-                st.success("File encrypted and uploaded successfully.")
-
-
-# ---------------- STUDENT VIEW / DOWNLOAD ----------------
-
-elif menu == "Student View / Download File":
-    st.header("Student View and Download Files")
+elif menu == "Phase 3: Secure Transfer":
+    st.header("Phase 3: Secure File Transfer")
 
     if not st.session_state.stage2:
-        st.error("Please complete Phase 1 and Phase 2 login first.")
-    elif st.session_state.role != "Student":
-        st.error("Only students can view and download learning files.")
+        st.error("Please complete Phase 1 and Phase 2 first.")
     else:
-        st.subheader("Phase 3: AES File Access Key Verification")
-
         access_key = st.text_input("Enter AES File Access Key", type="password")
 
         if st.button("Verify Phase 3"):
             if verify_file_access_key(access_key):
                 st.session_state.stage3 = True
-                st.success("Phase 3 passed. You can now view and download files.")
+                add_log("Phase 3 Authentication", f"{st.session_state.username} verified AES access key", "Success")
+                st.success("Phase 3 passed. Secure file transfer unlocked.")
             else:
+                add_log("Phase 3 Authentication", "Wrong AES file access key", "Failed")
                 st.error("Invalid AES file access key.")
 
-        if st.session_state.stage3:
-            files = get_all_files()
+        st.info("Default Phase 3 key for demo: AES123")
 
-            if not files:
-                st.info("No files uploaded yet.")
+
+# ---------------- SECURE LOGIN ----------------
+
+elif menu == "Secure Login":
+    st.header("Complete Secure Login")
+
+    st.write("This page checks your full login status.")
+
+    if st.session_state.stage1:
+        st.success("Phase 1: Passed")
+    else:
+        st.error("Phase 1: Not completed")
+
+    if st.session_state.stage2:
+        st.success("Phase 2: Passed")
+    else:
+        st.error("Phase 2: Not completed")
+
+    if st.session_state.stage3:
+        st.success("Phase 3: Passed")
+    else:
+        st.error("Phase 3: Not completed")
+
+
+# ---------------- APPLICATION DASHBOARD ----------------
+
+elif menu == "Application Dashboard":
+    st.header("Application Dashboard")
+
+    if not st.session_state.stage2:
+        st.error("Please login first.")
+    else:
+        st.success(f"Welcome {st.session_state.username}")
+
+        if st.session_state.role == "Staff":
+            st.subheader("Staff File Upload")
+
+            uploaded_file = st.file_uploader("Upload Learning File")
+
+            if uploaded_file is not None:
+                file_bytes = uploaded_file.read()
+
+                if st.button("Encrypt and Upload File"):
+                    save_file(uploaded_file.name, file_bytes, st.session_state.username)
+                    st.success("File encrypted and uploaded successfully.")
+
+        elif st.session_state.role == "Student":
+            st.subheader("Student View and Download Files")
+
+            if not st.session_state.stage3:
+                st.error("Please complete Phase 3 before viewing or downloading files.")
             else:
-                for file_id, filename, encrypted_data, uploaded_by in files:
-                    with st.expander(f"{filename} | Uploaded by {uploaded_by}"):
-                        st.write("Encrypted file data:")
-                        st.code(str(encrypted_data[:150]) + "...")
+                files = get_all_files()
 
-                        try:
-                            decrypted_file = decrypt_file(encrypted_data)
+                if not files:
+                    st.info("No files uploaded yet.")
+                else:
+                    for file_id, filename, encrypted_data, uploaded_by in files:
+                        with st.expander(f"{filename} | Uploaded by {uploaded_by}"):
+                            st.write("Encrypted file preview:")
+                            st.code(str(encrypted_data[:150]) + "...")
 
-                            st.success("File decrypted successfully.")
+                            try:
+                                decrypted_file = decrypt_file(encrypted_data)
 
-                            st.download_button(
-                                label=f"Download {filename}",
-                                data=decrypted_file,
-                                file_name=filename,
-                                mime="application/octet-stream"
-                            )
+                                st.success("File decrypted successfully.")
 
-                        except Exception:
-                            st.error("Unable to decrypt file.")
+                                st.download_button(
+                                    label=f"Download {filename}",
+                                    data=decrypted_file,
+                                    file_name=filename,
+                                    mime="application/octet-stream"
+                                )
+
+                            except Exception:
+                                st.error("Unable to decrypt file.")
 
 
-# ---------------- ATTACK SCENARIOS ----------------
+# ---------------- ATTACK SIMULATION ----------------
 
-elif menu == "Attack Scenarios":
+elif menu == "Attack Simulation":
     st.header("Attack Scenario Simulation")
 
     attack = st.selectbox(
@@ -349,59 +538,74 @@ elif menu == "Attack Scenarios":
     )
 
     if attack == "Brute Force Attack":
-        st.subheader("Brute Force Attack Simulation")
+        st.subheader("Brute Force Attack")
 
         st.write("""
-        In a brute force attack, an attacker repeatedly guesses the password.
-        In this system, even if the password is guessed, the attacker still needs
-        the random key and AES file access key.
+        A brute force attacker repeatedly guesses passwords.
+        This system blocks the attacker because password alone is not enough.
+        Random key and AES access key are also required.
         """)
 
         guessed_password = st.text_input("Attacker guessed password")
-        guessed_random_key = st.text_input("Attacker guessed random key")
+        guessed_key = st.text_input("Attacker guessed random key")
 
-        if st.button("Launch Brute Force Simulation"):
-            if guessed_password and not guessed_random_key:
+        if st.button("Launch Brute Force Attack"):
+            if guessed_password and not guessed_key:
                 st.warning("Password guessed, but random key missing.")
                 st.error("Attack failed at Phase 2.")
-            elif guessed_password and guessed_random_key != "correct":
-                st.error("Attack failed because random key is incorrect.")
             else:
                 st.error("Attack failed. Three-phase authentication blocks access.")
 
+            add_log("Attack Simulation", "Brute force attack simulated", "Blocked")
+
     elif attack == "Dictionary Attack":
-        st.subheader("Dictionary Attack Simulation")
+        st.subheader("Dictionary Attack")
 
         st.write("""
-        In a dictionary attack, the attacker uses common passwords such as
-        password123, admin, qwerty, or student123.
+        A dictionary attacker tries common passwords such as admin, password123,
+        student123, qwerty, or letmein.
         """)
 
-        common_password = st.selectbox(
-            "Choose dictionary password",
-            ["password123", "admin", "qwerty", "student123", "letmein"]
+        password = st.selectbox(
+            "Dictionary password attempted",
+            ["admin", "password123", "student123", "qwerty", "letmein"]
         )
 
         if st.button("Launch Dictionary Attack"):
-            st.warning(f"Attacker tried password: {common_password}")
-            st.error("Attack failed because random key and AES file access key are still required.")
+            st.warning(f"Attacker tried: {password}")
+            st.error("Attack failed. Random key and AES access key are still required.")
+            add_log("Attack Simulation", "Dictionary attack simulated", "Blocked")
 
     elif attack == "Man-In-The-Middle Attack":
-        st.subheader("MITM Attack Simulation")
+        st.subheader("Man-In-The-Middle Attack")
 
         st.write("""
-        In a MITM attack, the attacker tries to intercept files during communication.
-        Since the uploaded files are encrypted, intercepted data is unreadable.
+        A MITM attacker tries to intercept a file during transfer.
+        Since files are encrypted using AES-style encryption, intercepted data is unreadable.
         """)
 
-        sample_text = b"This is confidential learning material."
-        encrypted_sample = encrypt_file(sample_text)
+        sample_data = b"This is confidential learning material."
+        encrypted_sample = encrypt_file(sample_data)
 
         st.write("Intercepted encrypted data:")
         st.code(encrypted_sample)
 
         if st.button("Try to Read Intercepted Data"):
-            st.error("MITM attack failed. The attacker can only see encrypted ciphertext.")
+            st.error("MITM attack failed. Attacker only sees encrypted ciphertext.")
+            add_log("Attack Simulation", "MITM attack simulated", "Blocked")
+
+
+# ---------------- LOGS ----------------
+
+elif menu == "Authentication Logs":
+    st.header("Authentication Logs")
+
+    logs = get_logs()
+
+    if not logs:
+        st.info("No logs available.")
+    else:
+        st.table(logs)
 
 
 # ---------------- LOGOUT ----------------
